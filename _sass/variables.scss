@@ -1,23 +1,124 @@
 // Breakpoints
-$large-breakpoint: 64em !default;
-$medium-breakpoint: 42em !default;
+$large-breakpoint: 68em !default;
+$medium-breakpoint: 48em !default;
 
-// Headers
-$header-heading-color: #fff !default;
-$header-bg-color: #159957 !default;
-$header-bg-color-secondary: #155799 !default;
+// Legacy SCSS variables (kept for backward compatibility)
+$header-heading-color: #F8FAFC !default;
+$header-bg-color: #10B981 !default;
+$header-bg-color-secondary: #06B6D4 !default;
+$section-headings-color: #10B981 !default;
+$body-text-color: #334155 !default;
+$body-link-color: #059669 !default;
+$blockquote-text-color: #64748B !default;
+$code-bg-color: #1E293B !default;
+$code-text-color: #E2E8F0 !default;
+$border-color: #E2E8F0 !default;
+$table-border-color: #E2E8F0 !default;
+$hr-border-color: #E2E8F0 !default;
 
-// Text
-$section-headings-color: #159957 !default;
-$body-text-color: #606c71 !default;
-$body-link-color: #1e6bb8 !default;
-$blockquote-text-color: #819198 !default;
+// Modern CSS Custom Properties (Light & Obsidian Dark Mode Tokens)
+:root {
+  // Raw Light Palette
+  --bg-canvas-light: #F8FAFC;
+  --bg-surface-1-light: #FFFFFF;
+  --bg-surface-2-light: #F1F5F9;
+  --bg-glass-light: rgba(255, 255, 255, 0.82);
+  --border-subtle-light: #E2E8F0;
+  --border-highlight-light: #CBD5E1;
+  --text-primary-light: #0F172A;
+  --text-secondary-light: #475569;
+  --text-muted-light: #64748B;
+  --shadow-card-light: 0 10px 30px -10px rgba(15, 23, 42, 0.08), 0 4px 6px -4px rgba(15, 23, 42, 0.04);
 
-// Code
-$code-bg-color: #f3f6fa !default;
-$code-text-color: #567482 !default;
+  // Raw Dark Palette (Obsidian Slate & VNU Emerald)
+  --bg-canvas-dark: #090D16;
+  --bg-surface-1-dark: #111827;
+  --bg-surface-2-dark: #1E293B;
+  --bg-glass-dark: rgba(17, 24, 39, 0.78);
+  --border-subtle-dark: #1F2937;
+  --border-highlight-dark: #334155;
+  --text-primary-dark: #F8FAFC;
+  --text-secondary-dark: #94A3B8;
+  --text-muted-dark: #64748B;
+  --shadow-card-dark: 0 20px 40px -15px rgba(0, 0, 0, 0.6), 0 0 1px 1px rgba(255, 255, 255, 0.05);
 
-// Borders
-$border-color: #dce6f0 !default;
-$table-border-color: #e9ebec !default;
-$hr-border-color: #eff0f1 !default;
+  // Brand & Semantic Status Tokens
+  --accent-primary: #10B981;
+  --accent-primary-hover: #059669;
+  --accent-secondary: #06B6D4;
+  --status-warning: #F59E0B;
+  --status-danger: #EF4444;
+  --accent-glow: rgba(16, 185, 129, 0.22);
+
+  // Default fallback (Light)
+  --bg-canvas: var(--bg-canvas-light);
+  --bg-surface-1: var(--bg-surface-1-light);
+  --bg-surface-2: var(--bg-surface-2-light);
+  --bg-glass: var(--bg-glass-light);
+  --border-subtle: var(--border-subtle-light);
+  --border-highlight: var(--border-highlight-light);
+  --text-primary: var(--text-primary-light);
+  --text-secondary: var(--text-secondary-light);
+  --text-muted: var(--text-muted-light);
+  --shadow-card: var(--shadow-card-light);
+
+  // Fallback for browsers without light-dark() support
+  @media (prefers-color-scheme: dark) {
+    --bg-canvas: var(--bg-canvas-dark);
+    --bg-surface-1: var(--bg-surface-1-dark);
+    --bg-surface-2: var(--bg-surface-2-dark);
+    --bg-glass: var(--bg-glass-dark);
+    --border-subtle: var(--border-subtle-dark);
+    --border-highlight: var(--border-highlight-dark);
+    --text-primary: var(--text-primary-dark);
+    --text-secondary: var(--text-secondary-dark);
+    --text-muted: var(--text-muted-dark);
+    --shadow-card: var(--shadow-card-dark);
+  }
+
+  // Native CSS light-dark() automatic resolution
+  @supports (color: light-dark(white, black)) {
+    --bg-canvas: light-dark(var(--bg-canvas-light), var(--bg-canvas-dark));
+    --bg-surface-1: light-dark(var(--bg-surface-1-light), var(--bg-surface-1-dark));
+    --bg-surface-2: light-dark(var(--bg-surface-2-light), var(--bg-surface-2-dark));
+    --bg-glass: light-dark(var(--bg-glass-light), var(--bg-glass-dark));
+    --border-subtle: light-dark(var(--border-subtle-light), var(--border-subtle-dark));
+    --border-highlight: light-dark(var(--border-highlight-light), var(--border-highlight-dark));
+    --text-primary: light-dark(var(--text-primary-light), var(--text-primary-dark));
+    --text-secondary: light-dark(var(--text-secondary-light), var(--text-secondary-dark));
+    --text-muted: light-dark(var(--text-muted-light), var(--text-muted-dark));
+  }
+
+  // MANDATORY: Automatically adapt native UI to user system preferences
+  color-scheme: light dark;
+  accent-color: var(--accent-primary);
+
+  // Reflect manual <meta name="color-scheme"> override in CSS
+  &:has(> head > meta[name="color-scheme"][content="dark"]) {
+    color-scheme: dark;
+    --bg-canvas: var(--bg-canvas-dark);
+    --bg-surface-1: var(--bg-surface-1-dark);
+    --bg-surface-2: var(--bg-surface-2-dark);
+    --bg-glass: var(--bg-glass-dark);
+    --border-subtle: var(--border-subtle-dark);
+    --border-highlight: var(--border-highlight-dark);
+    --text-primary: var(--text-primary-dark);
+    --text-secondary: var(--text-secondary-dark);
+    --text-muted: var(--text-muted-dark);
+    --shadow-card: var(--shadow-card-dark);
+  }
+
+  &:has(> head > meta[name="color-scheme"][content="light"]) {
+    color-scheme: light;
+    --bg-canvas: var(--bg-canvas-light);
+    --bg-surface-1: var(--bg-surface-1-light);
+    --bg-surface-2: var(--bg-surface-2-light);
+    --bg-glass: var(--bg-glass-light);
+    --border-subtle: var(--border-subtle-light);
+    --border-highlight: var(--border-highlight-light);
+    --text-primary: var(--text-primary-light);
+    --text-secondary: var(--text-secondary-light);
+    --text-muted: var(--text-muted-light);
+    --shadow-card: var(--shadow-card-light);
+  }
+}
