@@ -1,0 +1,77 @@
+{
+  "manifest_version": 3,
+  "name": "Auto DKMH VNU",
+  "version": "2.0.0",
+  "author": "Duc Lv",
+  "homepage_url": "https://duclvz.github.io/AutoDKMH",
+  "description": "Công cụ hỗ trợ đăng ký môn học VNU tốc độ cao với Live Queue Cards, Ghim môn Burst x100, Chim Mồi Canary chống văng phiên và chống lỗi 503.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_title": "Auto DKMH VNU v2.0"
+  },
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "permissions": [
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "*://*.dangkyhoc.vnu.edu.vn/*",
+    "http://localhost/dang-ky-mon-hoc*",
+    "http://localhost/dang-nhap*",
+    "http://localhost/dangnhap*",
+    "http://127.0.0.1/dang-ky-mon-hoc*",
+    "http://127.0.0.1/dang-nhap*",
+    "http://127.0.0.1/dangnhap*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.dangkyhoc.vnu.edu.vn/dang-ky-mon-hoc*",
+        "*://*.dangkyhoc.vnu.edu.vn/dang-nhap*",
+        "*://*.dangkyhoc.vnu.edu.vn/dangnhap*",
+        "*://*.dangkyhoc.vnu.edu.vn/*"
+      ],
+      "js": [
+        "content-injector.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "http://localhost/dang-ky-mon-hoc*",
+        "http://localhost/dang-nhap*",
+        "http://localhost/dangnhap*",
+        "http://127.0.0.1/dang-ky-mon-hoc*",
+        "http://127.0.0.1/dang-nhap*",
+        "http://127.0.0.1/dangnhap*"
+      ],
+      "js": [
+        "content-injector.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "page-bridge.js"
+      ],
+      "matches": [
+        "*://*.dangkyhoc.vnu.edu.vn/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*"
+      ]
+    }
+  ]
+}
