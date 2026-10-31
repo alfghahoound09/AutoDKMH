@@ -1,8 +1,9 @@
 /**
  * Auto DKMH VNU v2.0 - Page Bridge & Shadow DOM Floating Command Panel
  * Features:
- * - Solution 1: Proactive Anti-Kick Defense (Canary Probe + Silent Session Heartbeat + Human Jitter)
- * - Pinned Course Burst Multiplier (Ghim môn x10 / x25 / x50 / x100 + Pipelined Burst + Instant Early-Commit)
+ * - Stealth Background Hang Engine: Solution B (Serialized Single-Shot Pacing) + Solution A (Passive Slot Radar) + Solution C (Sticky Selected Lock)
+ * - Unthrottled Web Worker Background Timer (Chạy ngầm 100% khi ẩn tab / thu nhỏ trình duyệt)
+ * - Silent Session Heartbeat (3m) + 0ms Circuit Breaker + 503 Recovery Overlay
  */
 (function () {
   'use strict';
@@ -11,13 +12,108 @@
 
   const REQUEST_TIMEOUT_MS = 6000; // Cắt kết nối treo sau 6s
   const HEARTBEAT_INTERVAL_MS = 180000; // 3 phút ping nhẹ giữ phiên 1 lần
-  const BURST_PRESETS = [50, 100, 150, 1]; // Nút chọn nhanh số lần bắn nền trong Auto (Mặc định: 50)
+  const DEFAULT_BURST = 50; // Tổng số lượt treo săn ngầm mặc định cho mỗi môn
   const MIN_BURST = 1;
   const MAX_BURST = 1000;
-  const BURST_CONCURRENCY = 4; // Số luồng song song trong 1 đợt bắn nền
+  const INTER_COURSE_MIN_GAP_MS = 850; // Khoảng giãn cách tuần tự giữa 2 môn chống khóa Session ASP.NET
+  const INTER_COURSE_JITTER_MS = 500;
+
+  // =========================================================================
+  // 0. UNTHROTTLED WEB WORKER BACKGROUND TIMER (CHỐNG CHROME/BRAVE NGỦ ĐÔNG TAB NGẦM)
+  // =========================================================================
+  function createBackgroundWorkerTimer() {
+    const callbacks = new Map();
+    let worker = null;
+
+    try {
+      const workerCode = `
+        const timers = new Map();
+        self.onmessage = function (e) {
+          const data = e.data || {};
+          const id = data.id;
+          if (data.cmd === 'setTimeout') {
+            if (timers.has(id)) clearTimeout(timers.get(id).ref);
+            const ref = setTimeout(() => {
+              timers.delete(id);
+              self.postMessage({ id });
+            }, data.delayMs);
+            timers.set(id, { type: 'timeout', ref });
+          } else if (data.cmd === 'setInterval') {
+            if (timers.has(id)) clearInterval(timers.get(id).ref);
+            const ref = setInterval(() => {
+              self.postMessage({ id });
+            }, data.delayMs);
+            timers.set(id, { type: 'interval', ref });
+          } else if (data.cmd === 'clear') {
+            if (timers.has(id)) {
+              const t = timers.get(id);
+              if (t.type === 'interval') clearInterval(t.ref);
+              else clearTimeout(t.ref);
+              timers.delete(id);
+            }
+          }
+        };
+      `;
+      const blob = new Blob([workerCode], { type: 'application/javascript' });
+      const blobUrl = URL.createObjectURL(blob);
+      worker = new Worker(blobUrl);
+      worker.onmessage = (e) => {
+        const id = e.data && e.data.id;
+        const cb = callbacks.get(id);
+        if (cb) cb();
+      };
+    } catch (err) {
+      worker = null;
+    }
+
+    const fallbackRefs = new Map();
+
+    return {
+      isWorkerBacked: Boolean(worker),
+      setTimeout(id, fn, delayMs) {
+        callbacks.set(id, fn);
+        if (worker) {
+          worker.postMessage({ cmd: 'setTimeout', id, delayMs });
+        } else {
+          if (fallbackRefs.has(id)) clearTimeout(fallbackRefs.get(id));
+          fallbackRefs.set(
+            id,
+            window.setTimeout(() => {
+              fallbackRefs.delete(id);
+              fn();
+            }, delayMs)
+          );
+        }
+      },
+      setInterval(id, fn, delayMs) {
+        callbacks.set(id, fn);
+        if (worker) {
+          worker.postMessage({ cmd: 'setInterval', id, delayMs });
+        } else {
+          if (fallbackRefs.has(id)) clearInterval(fallbackRefs.get(id));
+          fallbackRefs.set(id, window.setInterval(fn, delayMs));
+        }
+      },
+      clear(id) {
+        callbacks.delete(id);
+        if (worker) {
+          worker.postMessage({ cmd: 'clear', id });
+        } else if (fallbackRefs.has(id)) {
+          clearTimeout(fallbackRefs.get(id));
+          clearInterval(fallbackRefs.get(id));
+          fallbackRefs.delete(id);
+        }
+      }
+    };
+  }
+
+  const bgTimer = createBackgroundWorkerTimer();
 
   function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    return new Promise((resolve) => {
+      const id = 'sleep_' + Math.random().toString(36).slice(2);
+      bgTimer.setTimeout(id, resolve, ms);
+    });
   }
 
   // Chỉ coi là trang sập 503 / ASP.NET Error khi KHÔNG có bảng môn học #divDSDK và nội dung trang ngắn chứa thông báo lỗi
@@ -178,21 +274,19 @@
   mount503RecoveryOverlay();
 
   // =========================================================================
-  // 3. STATE, QUEUE & BACKGROUND AUTO BURST (MẶC ĐỊNH 50 LẦN, MIN 1 - MAX 1000)
+  // 3. STATE, QUEUE & STEALTH HANG ENGINE (SOLUTION B + A + C + WORKER)
   // =========================================================================
   let queue = [];
   let isProcessing = false;
-  let autoTimer = null;
+  let isAutoRunning = false;
+  let autoTickCount = 0;
   let intervalSec = 2;
-  let globalBurstCount = 50; // Mặc định bắn nền 50 lần trong Auto (min 1, max 1000)
-  let canaryModeEnabled = true;
-  let heartbeatEnabled = true;
-  let heartbeatTimer = null;
   let consecutiveOverloads = 0;
 
+  // Mỗi môn có số lượt treo săn ngầm riêng (item.burstCount), giới hạn MIN_BURST – MAX_BURST
   function clampBurst(val) {
     const num = parseInt(val, 10);
-    if (Number.isNaN(num)) return 50;
+    if (Number.isNaN(num)) return DEFAULT_BURST;
     return Math.min(MAX_BURST, Math.max(MIN_BURST, num));
   }
 
@@ -201,10 +295,13 @@
       id: item.id,
       code: item.code,
       name: item.name,
-      status: item.status === 'sending' || item.status === 'shielded' ? 'idle' : item.status,
+      status: item.status === 'sending' || item.status === 'hanging' ? 'idle' : item.status,
       pingMs: item.pingMs || 0,
       attempts: item.attempts || 0,
-      burstProgress: 0
+      burstCount: clampBurst(item.burstCount),
+      burstProgress: item.burstProgress || 0,
+      slotText: item.slotText || '',
+      hasOpenSlot: Boolean(item.hasOpenSlot)
     }));
     window.postMessage({ source: 'AUTODKMH_PAGE', type: 'SAVE_QUEUE', queue: cleanQueue }, '*');
   }
@@ -334,40 +431,6 @@
       padding: 12px 14px;
     }
 
-    .shield-bar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 6px;
-      padding: 6px 9px;
-      margin-bottom: 10px;
-      border-radius: 8px;
-      background: var(--bg-canvas);
-      border: 1px solid var(--border-subtle);
-      font-size: 11px;
-    }
-
-    .shield-chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      padding: 3px 7px;
-      border-radius: 6px;
-      border: 1px solid var(--border-highlight);
-      background: var(--bg-surface-2);
-      color: var(--text-secondary);
-      cursor: pointer;
-      user-select: none;
-      font-weight: 600;
-      transition: all 0.15s ease;
-    }
-
-    .shield-chip.active {
-      border-color: rgba(16, 185, 129, 0.5);
-      background: rgba(16, 185, 129, 0.14);
-      color: var(--accent-primary);
-    }
-
     .input-row {
       display: flex;
       gap: 5px;
@@ -390,62 +453,24 @@
       border-color: var(--accent-secondary);
     }
 
-    .burst-bar {
-      display: flex;
+    .card-burst {
+      display: inline-flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 6px;
-      padding: 6px 9px;
-      margin-bottom: 10px;
-      border-radius: 8px;
-      background: var(--bg-canvas);
-      border: 1px solid var(--border-subtle);
-      font-size: 11.5px;
-    }
-
-    .burst-label {
-      color: var(--text-secondary);
-      font-weight: 600;
-      white-space: nowrap;
-    }
-
-    .burst-presets {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-    }
-
-    .burst-btn {
-      padding: 3px 8px;
-      border-radius: 6px;
-      border: 1px solid var(--border-highlight);
-      background: var(--bg-surface-2);
-      color: var(--text-secondary);
-      font-size: 11px;
+      gap: 2px;
+      flex-shrink: 0;
+      font-size: 10.5px;
       font-weight: 700;
-      cursor: pointer;
-      transition: all 0.15s ease;
-    }
-
-    .burst-btn:hover {
-      border-color: var(--status-warning);
-      color: var(--status-warning);
-    }
-
-    .burst-btn.active {
-      background: rgba(245, 158, 11, 0.2);
-      border-color: var(--status-warning);
       color: var(--status-warning);
     }
 
     .burst-input {
-      width: 58px;
-      padding: 3px 6px;
-      border-radius: 6px;
-      border: 1px solid var(--border-highlight);
-      background: var(--bg-surface-2);
+      width: 52px;
+      padding: 2px 4px;
+      border-radius: 5px;
+      border: 1px solid rgba(245, 158, 11, 0.45);
+      background: var(--bg-canvas);
       color: var(--status-warning);
-      font-size: 11.5px;
+      font-size: 11px;
       font-weight: 700;
       text-align: center;
       outline: none;
@@ -453,6 +478,11 @@
 
     .burst-input:focus {
       border-color: var(--status-warning);
+    }
+
+    .burst-input:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
     }
 
     .btn-add {
@@ -503,16 +533,11 @@
       transition: all 0.15s ease;
     }
 
-    .queue-card.is-pinned {
-      background: linear-gradient(90deg, rgba(245, 158, 11, 0.14), var(--bg-surface-2) 65%);
-      border-color: rgba(245, 158, 11, 0.65);
-    }
-
-    .queue-card.status-sending { border-color: var(--accent-secondary); }
+    .queue-card.status-sending,
+    .queue-card.status-hanging { border-color: var(--accent-secondary); }
     .queue-card.status-selected,
     .queue-card.status-confirmed { border-color: var(--accent-primary); }
     .queue-card.status-full { border-color: var(--status-warning); }
-    .queue-card.status-shielded { border-color: #334155; opacity: 0.85; }
     .queue-card.status-overload,
     .queue-card.status-expired { border-color: var(--status-danger); }
 
@@ -523,40 +548,22 @@
       min-width: 0;
     }
 
-    .canary-tag {
+    .slot-pill {
       font-size: 10px;
-      padding: 1px 4px;
+      padding: 1px 5px;
       border-radius: 4px;
-      background: rgba(6, 182, 212, 0.18);
-      color: var(--accent-secondary);
-      border: 1px solid rgba(6, 182, 212, 0.35);
+      font-family: monospace;
       font-weight: 700;
       flex-shrink: 0;
-    }
-
-    .pin-btn {
-      padding: 3px 7px;
-      border-radius: 5px;
-      border: 1px solid var(--border-highlight);
-      background: var(--bg-canvas);
+      background: rgba(100, 116, 139, 0.22);
       color: var(--text-secondary);
-      font-size: 11px;
-      font-weight: 700;
-      cursor: pointer;
-      flex-shrink: 0;
-      transition: all 0.15s ease;
+      border: 1px solid rgba(100, 116, 139, 0.35);
     }
 
-    .pin-btn:hover {
-      border-color: var(--status-warning);
-      color: var(--status-warning);
-    }
-
-    .pin-btn.pinned {
-      background: rgba(245, 158, 11, 0.22);
-      border-color: var(--status-warning);
-      color: var(--status-warning);
-      box-shadow: 0 0 8px rgba(245, 158, 11, 0.3);
+    .slot-pill.open {
+      background: rgba(16, 185, 129, 0.18);
+      color: var(--accent-primary);
+      border-color: rgba(16, 185, 129, 0.45);
     }
 
     .row-id {
@@ -595,11 +602,11 @@
     }
 
     .badge-idle { background: var(--bg-canvas); color: var(--text-secondary); }
-    .badge-sending { background: rgba(6, 182, 212, 0.2); color: var(--accent-secondary); }
+    .badge-sending,
+    .badge-hanging { background: rgba(6, 182, 212, 0.2); color: var(--accent-secondary); }
     .badge-selected,
     .badge-confirmed { background: rgba(16, 185, 129, 0.2); color: var(--accent-primary); }
     .badge-full { background: rgba(245, 158, 11, 0.2); color: var(--status-warning); }
-    .badge-shielded { background: var(--bg-canvas); color: var(--text-secondary); }
     .badge-overload,
     .badge-expired { background: rgba(239, 68, 68, 0.2); color: var(--status-danger); }
 
@@ -692,24 +699,6 @@
       </div>
     </div>
     <div class="panel-body">
-      <div class="shield-bar">
-        <button type="button" class="shield-chip active" id="canary-toggle" title="Chỉ bắn 1 request thăm dò khi cổng đang khóa/503 để chống văng phiên">
-          🐦 Chim Mồi (Canary): BẬT
-        </button>
-        <button type="button" class="shield-chip active" id="heartbeat-toggle" title="Tự động ping nhẹ mỗi 3 phút để nuôi sống ASP.NET_SessionId">
-          💓 Giữ phiên 3p: BẬT
-        </button>
-      </div>
-      <div class="burst-bar">
-        <span class="burst-label" title="Số lần bắn nền tự động cho mỗi môn trong Auto (Min: 1, Max: 1000)">🎯 Ghim môn:</span>
-        <div class="burst-presets">
-          <button type="button" class="burst-btn active" data-burst="50">50</button>
-          <button type="button" class="burst-btn" data-burst="100">100</button>
-          <button type="button" class="burst-btn" data-burst="150">150</button>
-          <button type="button" class="burst-btn" data-burst="1">1</button>
-          <input type="number" class="burst-input" id="burst-input" value="50" min="1" max="1000" title="Nhập số lần bắn nền (Min: 1 - Max: 1000)" />
-        </div>
-      </div>
       <div class="input-row">
         <input type="text" id="course-input" placeholder="Nhập mã môn (VD: 926 hoặc UET.CS2046 7)..." />
         <button type="button" class="btn-add" id="add-btn">+ Thêm</button>
@@ -721,7 +710,7 @@
         <input type="number" class="interval-input" id="interval-input" value="2" min="1" max="60" title="Chu kỳ Auto (giây)" />
       </div>
       <div class="toast" id="toast-box">
-        🎯 <strong>Auto chạy nền:</strong> Mặc định bắn <strong>50 lần/môn</strong> (có thể chọn nhanh <strong>50 / 100 / 150 / 1</strong> hoặc nhập <strong>1–1000</strong>) và tự động chốt đơn ngay khi trúng slot!
+        🛰️ <strong>Treo săn ngầm chống văng (B+A+C + Worker):</strong> Mỗi chu kỳ điểm danh tuần tự <strong>1 gói/môn</strong> (tối đa <strong>🎯 số lượt</strong> đã đặt), tự găm giỏ & chốt đơn khi có slot!
       </div>
     </div>
   `;
@@ -729,12 +718,8 @@
   shadow.appendChild(style);
   shadow.appendChild(panel);
 
-  const canaryToggle = shadow.getElementById('canary-toggle');
-  const heartbeatToggle = shadow.getElementById('heartbeat-toggle');
   const resetStatusBtn = shadow.getElementById('reset-status-btn');
   const minimizeBtn = shadow.getElementById('minimize-btn');
-  const burstInput = shadow.getElementById('burst-input');
-  const burstBtns = Array.from(shadow.querySelectorAll('.burst-btn'));
   const courseInput = shadow.getElementById('course-input');
   const addBtn = shadow.getElementById('add-btn');
   const queueListEl = shadow.getElementById('queue-list');
@@ -747,69 +732,35 @@
     toastBox.innerHTML = html;
   }
 
-  function syncBurstUI(newVal) {
-    globalBurstCount = clampBurst(newVal);
-    burstInput.value = String(globalBurstCount);
-    burstBtns.forEach((btn) => {
-      btn.classList.toggle('active', parseInt(btn.dataset.burst, 10) === globalBurstCount);
-    });
-    renderQueue();
-  }
-
-  burstBtns.forEach((btn) => {
-    btn.addEventListener('click', () => {
-      syncBurstUI(btn.dataset.burst);
-      setToast(
-        `🎯 Đã đặt chế độ <strong>Ghim bắn nền Auto = ${globalBurstCount} lần/môn</strong> (Min: 1, Max: 1000).`
-      );
-    });
-  });
-
-  burstInput.addEventListener('change', () => {
-    syncBurstUI(burstInput.value);
-    setToast(
-      `🎯 Đã đặt chế độ <strong>Ghim bắn nền Auto = ${globalBurstCount} lần/môn</strong> (Min: 1, Max: 1000).`
-    );
-  });
-
-  canaryToggle.addEventListener('click', () => {
-    canaryModeEnabled = !canaryModeEnabled;
-    canaryToggle.classList.toggle('active', canaryModeEnabled);
-    canaryToggle.textContent = canaryModeEnabled
-      ? '🐦 Chim Mồi (Canary): BẬT'
-      : '🐦 Chim Mồi (Canary): TẮT';
-    renderQueue();
-  });
-
+  // Giữ phiên 3 phút tự động chạy ngầm bằng Web Worker (không cần nút bấm trên UI)
   function startHeartbeat() {
-    if (heartbeatTimer) clearInterval(heartbeatTimer);
-    if (!heartbeatEnabled) return;
-
-    heartbeatTimer = setInterval(async () => {
-      if (isProcessing || autoBtn.classList.contains('active')) return;
-      try {
-        const res = await fetch('/dang-ky-mon-hoc-nganh-1', {
-          method: 'GET',
-          credentials: 'same-origin',
-          cache: 'no-store'
-        });
-        const text = await res.text();
-        if (isResponseSessionExpired(res, text)) {
-          setToast('⚠️ <strong>Cảnh báo:</strong> Phiên đăng nhập đã hết hạn! Hãy kiểm tra lại trước giờ mở cổng.');
-        } else {
-          const nowStr = new Date().toLocaleTimeString('vi-VN');
-          setToast(`💓 <strong>Keep-Alive (${nowStr}):</strong> Đã tự động làm mới phiên đăng nhập ngầm!`);
-        }
-      } catch (e) {}
-    }, HEARTBEAT_INTERVAL_MS + Math.floor(Math.random() * 12000));
+    bgTimer.clear('heartbeat');
+    bgTimer.setInterval(
+      'heartbeat',
+      async () => {
+        if (isProcessing || isAutoRunning) return;
+        try {
+          const res = await fetch('/dang-ky-mon-hoc-nganh-1', {
+            method: 'GET',
+            credentials: 'same-origin',
+            cache: 'no-store'
+          });
+          const text = await res.text();
+          if (isResponseSessionExpired(res, text)) {
+            setToast(
+              '⚠️ <strong>Cảnh báo:</strong> Phiên đăng nhập đã hết hạn! Hãy kiểm tra lại trước giờ mở cổng.'
+            );
+          } else {
+            const nowStr = new Date().toLocaleTimeString('vi-VN');
+            setToast(
+              `💓 <strong>Worker Keep-Alive (${nowStr}):</strong> Đã tự động làm mới phiên đăng nhập ngầm!`
+            );
+          }
+        } catch (e) {}
+      },
+      HEARTBEAT_INTERVAL_MS + Math.floor(Math.random() * 12000)
+    );
   }
-
-  heartbeatToggle.addEventListener('click', () => {
-    heartbeatEnabled = !heartbeatEnabled;
-    heartbeatToggle.classList.toggle('active', heartbeatEnabled);
-    heartbeatToggle.textContent = heartbeatEnabled ? '💓 Giữ phiên 3p: BẬT' : '💓 Giữ phiên 3p: TẮT';
-    startHeartbeat();
-  });
 
   startHeartbeat();
 
@@ -828,12 +779,71 @@
       item.pingMs = 0;
       item.burstProgress = 0;
     });
+    refreshSlotRadarFromDOM();
     saveQueue();
     renderQueue();
-    setToast('↺ Đã đặt lại trạng thái tất cả các môn về <strong>⏳ Sẵn sàng</strong>.');
+    setToast('↺ Đã đặt lại trạng thái tất cả các môn và lượt treo về <strong>⏳ Sẵn sàng (0/N)</strong>.');
   });
 
+  // =========================================================================
+  // SOLUTION A: PASSIVE SLOT RADAR (ĐỌC TRỰC TIẾP ĐK/TỔNG TỪ BẢNG #divDSDK)
+  // =========================================================================
+  function getRowSlotInfo(rowId) {
+    if (!rowId) return null;
+    const tr = document.querySelector(`#divDSDK table tbody tr[data-rowindex="${CSS.escape(String(rowId))}"]`);
+    if (!tr) return null;
+    const cells = tr.querySelectorAll('td');
+    if (cells.length < 7) return null;
+    const maxSlots = parseInt(cells[5].textContent.trim(), 10);
+    const enrolled = parseInt(cells[6].textContent.trim(), 10);
+    if (Number.isNaN(maxSlots) || Number.isNaN(enrolled) || maxSlots <= 0) {
+      return null;
+    }
+    return {
+      enrolled,
+      maxSlots,
+      slotText: `${enrolled}/${maxSlots}`,
+      hasOpenSlot: enrolled < maxSlots
+    };
+  }
+
+  function refreshSlotRadarFromDOM() {
+    ensureAllRowsHaveRowIndex();
+    queue.forEach((item) => {
+      const info = getRowSlotInfo(item.id);
+      if (info) {
+        item.slotText = info.slotText;
+        item.hasOpenSlot = info.hasOpenSlot;
+      }
+    });
+  }
+
+  function triggerSilentTableRefresh() {
+    if (isPageCrashed503()) return;
+    try {
+      if (typeof window.DSDK === 'function') {
+        let modVal = '1';
+        if (window.jQuery && window.jQuery('.sel-dsdk-mod').length > 0) {
+          modVal =
+            (typeof window.jQuery('.sel-dsdk-mod').select2 === 'function' &&
+              window.jQuery('.sel-dsdk-mod').select2('val')) ||
+            window.jQuery('.sel-dsdk-mod').val() ||
+            '1';
+        }
+        window.DSDK(modVal);
+      }
+    } catch (e) {}
+  }
+
   function renderQueue() {
+    // Giữ nguyên focus nếu user đang gõ số lần bắn của 1 môn trong lúc Auto đang chạy
+    const activeEl = shadow.activeElement;
+    const focusedBurstId =
+      activeEl && activeEl.classList && activeEl.classList.contains('burst-input')
+        ? activeEl.dataset.itemId
+        : null;
+    const focusedValue = focusedBurstId ? activeEl.value : null;
+
     queueListEl.innerHTML = '';
     if (queue.length === 0) {
       const empty = document.createElement('div');
@@ -843,49 +853,79 @@
       return;
     }
 
-    const firstUnconfirmedIdx = queue.findIndex((q) => q.status !== 'confirmed');
+    queue.forEach((item) => {
+      const burstCount = clampBurst(item.burstCount);
+      item.burstCount = burstCount;
+      const progress = item.burstProgress || 0;
 
-    queue.forEach((item, idx) => {
       const card = document.createElement('div');
       card.className = 'queue-card status-' + item.status;
-
-      const isCanary = canaryModeEnabled && queue.length > 1 && idx === firstUnconfirmedIdx;
 
       const left = document.createElement('div');
       left.className = 'card-left';
 
+      const slotBadgeHtml = item.slotText
+        ? `<span class="slot-pill ${item.hasOpenSlot ? 'open' : ''}" title="Sĩ số lớp hiện tại (ĐK/Tổng) theo Radar Solution A">${item.slotText}</span>`
+        : '';
+
       const infoSpan = document.createElement('span');
       infoSpan.style.cssText = 'display:flex;align-items:center;gap:5px;min-width:0;overflow:hidden;';
       infoSpan.innerHTML =
-        (isCanary ? '<span class="canary-tag" title="Môn Chim Mồi đi đầu thăm dò cổng">🐦 Mồi</span>' : '') +
         `<span class="row-id">#${item.id}</span>` +
         `<span class="course-code">${item.code || ''}</span>` +
+        slotBadgeHtml +
         `<span class="course-name">${item.name || ''}</span>`;
       left.appendChild(infoSpan);
 
       const right = document.createElement('div');
       right.className = 'card-right';
 
+      // Ô nhập số lượt treo săn ngầm riêng cho từng môn (Min 1 – Max 1000)
+      const burstWrap = document.createElement('label');
+      burstWrap.className = 'card-burst';
+      burstWrap.title = `Số lượt treo săn ngầm tuần tự cho môn này (Min ${MIN_BURST} – Max ${MAX_BURST})`;
+      burstWrap.textContent = '🎯';
+
+      const burstField = document.createElement('input');
+      burstField.type = 'number';
+      burstField.className = 'burst-input';
+      burstField.min = String(MIN_BURST);
+      burstField.max = String(MAX_BURST);
+      burstField.step = '1';
+      burstField.value = String(burstCount);
+      burstField.dataset.itemId = item.id;
+      burstField.disabled = item.status === 'sending';
+      burstField.addEventListener('change', () => {
+        const newVal = clampBurst(burstField.value);
+        item.burstCount = newVal;
+        if (item.status === 'full' && (item.burstProgress || 0) < newVal) {
+          item.status = 'hanging';
+        }
+        burstField.value = String(newVal);
+        saveQueue();
+        renderQueue();
+        setToast(
+          `🎯 Môn <strong>${item.code}</strong> (#${item.id}) sẽ treo săn ngầm tối đa <strong>${newVal} lượt</strong> (Min ${MIN_BURST} – Max ${MAX_BURST}).`
+        );
+      });
+      burstWrap.appendChild(burstField);
+
       const badge = document.createElement('span');
       badge.className = 'badge badge-' + item.status;
       if (item.status === 'idle') {
-        badge.textContent = `⏳ Sẵn sàng (x${globalBurstCount})`;
+        badge.textContent = progress > 0 ? `⏳ Sẵn sàng (${progress}/${burstCount})` : '⏳ Sẵn sàng';
       } else if (item.status === 'sending') {
-        if (globalBurstCount > 1 && item.burstProgress > 0) {
-          badge.textContent = `🎯 Bắn ${item.burstProgress}/${globalBurstCount} (${item.pingMs}ms)`;
-        } else {
-          badge.textContent = `🔄 Đang gửi... (${item.pingMs}ms)`;
-        }
+        badge.textContent = `🔄 Điểm danh ${progress}/${burstCount}...`;
+      } else if (item.status === 'hanging') {
+        badge.textContent = `🛰️ Treo ${progress}/${burstCount} (${item.pingMs}ms)`;
       } else if (item.status === 'selected') {
-        badge.textContent = `☑️ Trúng slot! (${item.pingMs}ms)`;
+        badge.textContent = `📌 Đã găm giỏ (${item.pingMs}ms)`;
       } else if (item.status === 'confirmed') {
         badge.textContent = `✅ Đã ghi nhận (${item.pingMs}ms)`;
       } else if (item.status === 'full') {
-        badge.textContent = `⚠️ Đầy (#${item.attempts} req)`;
-      } else if (item.status === 'shielded') {
-        badge.textContent = '🛡️ Chờ Chim Mồi';
+        badge.textContent = `⏸ Đủ ${progress}/${burstCount} lượt`;
       } else if (item.status === 'overload') {
-        badge.textContent = `🔥 Cổng khóa/503 (#${item.attempts})`;
+        badge.textContent = `🔥 Cổng khóa/503 (${progress}/${burstCount})`;
       } else if (item.status === 'expired') {
         badge.textContent = '❌ Văng phiên!';
       }
@@ -900,48 +940,106 @@
         renderQueue();
       });
 
+      right.appendChild(burstWrap);
       right.appendChild(badge);
       right.appendChild(delBtn);
       card.appendChild(left);
       card.appendChild(right);
       queueListEl.appendChild(card);
+
+      if (focusedBurstId && focusedBurstId === String(item.id) && !burstField.disabled) {
+        burstField.value = focusedValue;
+        burstField.focus();
+      }
     });
+  }
+
+  // Lưu ánh xạ mã lớp học phần -> data-rowindex để khi trang ở trạng thái "Ngoài thời hạn đăng ký!" (ẩn toàn bộ input.order) vẫn khôi phục đúng mã số
+  const ROW_MAP_STORAGE_KEY = 'autodkmh_v2_rowindex_map';
+  let cachedRowMap = {};
+  try {
+    cachedRowMap = JSON.parse(localStorage.getItem(ROW_MAP_STORAGE_KEY) || '{}') || {};
+  } catch (e) {
+    cachedRowMap = {};
+  }
+
+  function saveRowMap() {
+    try {
+      localStorage.setItem(ROW_MAP_STORAGE_KEY, JSON.stringify(cachedRowMap));
+    } catch (e) {}
+  }
+
+  function getCourseCodeFromTr(tr) {
+    const cells = tr ? tr.querySelectorAll('td') : [];
+    return cells.length >= 5 ? cells[4].textContent.trim() : '';
   }
 
   function ensureAllRowsHaveRowIndex() {
     const rows = Array.from(document.querySelectorAll('#divDSDK table tbody tr'));
     if (rows.length === 0) return rows;
 
-    // Pass 1: Đọc data-rowindex từ input.order hoặc data-rowindex trên tr
+    let mapUpdated = false;
+
+    // Pass 1: Đọc data-rowindex từ input.order, từ tr[data-rowindex], hoặc từ bộ nhớ cachedRowMap theo mã lớp
     let lastKnownIdx = null;
     rows.forEach((tr) => {
       const orderInput = tr.querySelector('.order');
+      const courseCode = getCourseCodeFromTr(tr);
       const existingIdx =
         (orderInput && orderInput.getAttribute('data-rowindex')) ||
-        tr.getAttribute('data-rowindex');
+        tr.getAttribute('data-rowindex') ||
+        (courseCode && cachedRowMap[courseCode]);
+
       if (existingIdx) {
-        tr.setAttribute('data-rowindex', existingIdx);
+        tr.setAttribute('data-rowindex', String(existingIdx));
+        if (courseCode && cachedRowMap[courseCode] !== String(existingIdx)) {
+          cachedRowMap[courseCode] = String(existingIdx);
+          mapUpdated = true;
+        }
         const parsed = parseInt(existingIdx, 10);
         if (!Number.isNaN(parsed)) lastKnownIdx = parsed;
       } else if (lastKnownIdx !== null) {
-        // Tự động nội suy mã số cho các lớp đã FULL (VNU ẩn thẻ input.order khi ĐK >= Tổng)
+        // Tự động nội suy mã số cho các lớp bị ẩn input.order (Lớp đầy hoặc Ngoài thời hạn đăng ký)
         lastKnownIdx += 1;
-        tr.setAttribute('data-rowindex', String(lastKnownIdx));
+        const inferred = String(lastKnownIdx);
+        tr.setAttribute('data-rowindex', inferred);
+        if (courseCode) {
+          cachedRowMap[courseCode] = inferred;
+          mapUpdated = true;
+        }
       }
     });
 
-    // Pass 2: Ngược từ dưới lên cho các lớp đầu bảng bị full (nếu có)
+    // Pass 2: Ngược từ dưới lên cho các lớp đầu bảng bị ẩn input.order
     let nextKnownIdx = null;
     for (let i = rows.length - 1; i >= 0; i--) {
       const tr = rows[i];
+      const courseCode = getCourseCodeFromTr(tr);
       const idxStr = tr.getAttribute('data-rowindex');
       if (idxStr) {
         const parsed = parseInt(idxStr, 10);
         if (!Number.isNaN(parsed)) nextKnownIdx = parsed;
       } else if (nextKnownIdx !== null && nextKnownIdx > 1) {
         nextKnownIdx -= 1;
-        tr.setAttribute('data-rowindex', String(nextKnownIdx));
+        const inferred = String(nextKnownIdx);
+        tr.setAttribute('data-rowindex', inferred);
+        if (courseCode) {
+          cachedRowMap[courseCode] = inferred;
+          mapUpdated = true;
+        }
       }
+    }
+
+    // Pass 3: Fallback nếu mở trực tiếp ở trạng thái "Ngoài thời hạn đăng ký!" và chưa có bất kỳ rowindex nào trong cache
+    rows.forEach((tr, idx) => {
+      if (!tr.getAttribute('data-rowindex')) {
+        const fallbackIdx = String(idx + 1);
+        tr.setAttribute('data-rowindex', fallbackIdx);
+      }
+    });
+
+    if (mapUpdated) {
+      saveRowMap();
     }
 
     return rows;
@@ -976,10 +1074,13 @@
         (rowIdx && rowIdx === clean) ||
         (courseCode && courseCode.toLowerCase() === clean.toLowerCase())
       ) {
+        const slotInfo = getRowSlotInfo(rowIdx || clean);
         return {
           id: rowIdx || clean,
           code: courseCode || ('Môn #' + rowIdx),
-          name: courseName
+          name: courseName,
+          slotText: slotInfo ? slotInfo.slotText : '',
+          hasOpenSlot: slotInfo ? slotInfo.hasOpenSlot : false
         };
       }
     }
@@ -987,7 +1088,9 @@
     return {
       id: clean,
       code: 'Mã #' + clean,
-      name: 'Gửi trực tiếp qua API'
+      name: 'Gửi trực tiếp qua API',
+      slotText: '',
+      hasOpenSlot: false
     };
   }
 
@@ -996,11 +1099,12 @@
     const existing = queue.find((q) => q.id === courseObj.id);
     if (existing) {
       setToast(
-        `ℹ️ Môn <strong>${existing.code}</strong> (#${existing.id}) đã có trong danh sách Auto (Bắn nền x${globalBurstCount} lần).`
+        `ℹ️ Môn <strong>${existing.code}</strong> (#${existing.id}) đã có trong danh sách Auto (Treo tối đa x${clampBurst(existing.burstCount)} lượt).`
       );
       return;
     }
 
+    const slotInfo = getRowSlotInfo(courseObj.id);
     queue.push({
       id: courseObj.id,
       code: courseObj.code || '',
@@ -1008,7 +1112,10 @@
       status: 'idle',
       pingMs: 0,
       attempts: 0,
-      burstProgress: 0
+      burstCount: DEFAULT_BURST,
+      burstProgress: 0,
+      slotText: slotInfo ? slotInfo.slotText : courseObj.slotText || '',
+      hasOpenSlot: slotInfo ? slotInfo.hasOpenSlot : Boolean(courseObj.hasOpenSlot)
     });
     saveQueue();
     renderQueue();
@@ -1037,11 +1144,42 @@
   });
 
   // =========================================================================
-  // 5. BATCHED DOM ENHANCEMENT ON VNU TABLE (CHỈ GẮN MÃ SỐ & NÚT "+Auto")
+  // 5. BATCHED DOM ENHANCEMENT ON VNU TABLE (MỞ KHÓA Ô TICK + MÃ SỐ + NÚT "+Auto")
   // =========================================================================
+  function unlockOutOfTimeConfirmButton() {
+    const outOfTimeBtn = document.querySelector('.btn-out-of-time');
+    const container =
+      (outOfTimeBtn && outOfTimeBtn.parentElement) || document.querySelector('.col-md-offset-0');
+    if (!container) return;
+
+    let confirmBtn = container.querySelector('.confirm-registration');
+    if (!confirmBtn) {
+      confirmBtn = document.createElement('button');
+      confirmBtn.type = 'button';
+      confirmBtn.className = 'btn btn-success confirm-registration';
+      confirmBtn.style.marginLeft = '6px';
+      confirmBtn.innerHTML = '💾 Ghi nhận';
+      container.appendChild(confirmBtn);
+    }
+
+    if (confirmBtn.dataset.autodkmhBound !== '1') {
+      confirmBtn.dataset.autodkmhBound = '1';
+      confirmBtn.addEventListener('click', async () => {
+        if (queue.some((q) => q.status === 'selected')) {
+          await commitSelectedCoursesImmediately();
+        } else {
+          await executeFastRegistration();
+        }
+      });
+    }
+  }
+
   async function enhanceCourseTable() {
+    unlockOutOfTimeConfirmButton();
     const rows = ensureAllRowsHaveRowIndex();
     if (rows.length === 0) return;
+    refreshSlotRadarFromDOM();
+    renderQueue();
     const BATCH = 20;
 
     for (let i = 0; i < rows.length; i += BATCH) {
@@ -1055,6 +1193,37 @@
 
             tr.dataset.autodkmhEnhanced = '1';
             firstCell.style.whiteSpace = 'nowrap';
+
+            // Nếu ở trạng thái "Ngoài thời hạn đăng ký!" hoặc lớp đầy khiến VNU ẩn ô tick, tự động khôi phục ô tick .order
+            let orderInput = firstCell.querySelector('.order');
+            if (!orderInput) {
+              orderInput = document.createElement('input');
+              orderInput.type = 'checkbox';
+              orderInput.className = 'order';
+              orderInput.setAttribute('data-rowindex', rowIndex);
+              orderInput.title = 'Tích chọn môn học (Đã mở khóa bởi Auto DKMH)';
+              firstCell.prepend(orderInput);
+            } else {
+              orderInput.disabled = false;
+              orderInput.setAttribute('data-rowindex', rowIndex);
+            }
+
+            if (orderInput.dataset.autodkmhBound !== '1') {
+              orderInput.dataset.autodkmhBound = '1';
+              orderInput.addEventListener('change', async () => {
+                const resolved = resolveCourseFromDOM(rowIndex);
+                if (!resolved) return;
+                let item = queue.find((q) => q.id === resolved.id);
+                if (!item) {
+                  addCourseItem(resolved);
+                  item = queue.find((q) => q.id === resolved.id);
+                }
+                if (orderInput.checked && item) {
+                  await processCourseItem(item);
+                  saveQueue();
+                }
+              });
+            }
 
             const badge = document.createElement('span');
             badge.style.cssText =
@@ -1072,18 +1241,12 @@
               const resolved = resolveCourseFromDOM(rowIndex);
               addCourseItem(resolved);
               setToast(
-                `➕ Đã thêm <strong>${resolved.code}</strong> (#${rowIndex}) vào Auto (Chạy nền x${globalBurstCount} lần).`
+                `➕ Đã thêm <strong>${resolved.code}</strong> (#${rowIndex}) vào Auto (Treo săn ngầm mặc định ${DEFAULT_BURST} lượt — chỉnh được trên thẻ môn).`
               );
             });
 
-            const orderInput = firstCell.querySelector('.order');
-            if (orderInput) {
-              orderInput.after(quickBtn);
-              orderInput.after(badge);
-            } else {
-              firstCell.appendChild(badge);
-              firstCell.appendChild(quickBtn);
-            }
+            orderInput.after(quickBtn);
+            orderInput.after(badge);
           });
           resolve();
         })
@@ -1110,7 +1273,7 @@
   }
 
   // =========================================================================
-  // 6. ENGINE: CANARY PROBE + PINNED BURST MULTIPLIER (x10 - x100) + EARLY COMMIT
+  // 6. STEALTH HANG ENGINE: SOLUTION B + SOLUTION A + SOLUTION C + WORKER
   // =========================================================================
   async function fetchWithTimeout(url, options, timeoutMs) {
     const controller = new AbortController();
@@ -1144,7 +1307,7 @@
 
       const bodyText = await response.text();
       item.pingMs = Math.floor(performance.now() - start);
-      item.attempts += 1;
+      item.attempts = (item.attempts || 0) + 1;
 
       if (isResponseSessionExpired(response, bodyText)) {
         return 'SESSION_EXPIRED';
@@ -1162,11 +1325,12 @@
       }
     } catch (err) {
       item.pingMs = Math.floor(performance.now() - start);
-      item.attempts += 1;
+      item.attempts = (item.attempts || 0) + 1;
       return 'PORTAL_BLOCKED';
     }
   }
 
+  // SOLUTION C: STICKY SELECTED LOCK (Đã găm vào giỏ thì chỉ gọi xác nhận, tuyệt đối không gọi lại /chon-mon-hoc tránh bị uncheck mất môn)
   async function commitSelectedCoursesImmediately() {
     const hasSelected = queue.some((q) => q.status === 'selected');
     if (!hasSelected) return false;
@@ -1184,6 +1348,10 @@
       );
 
       const confirmText = await confirmRes.text();
+      if (isResponseSessionExpired(confirmRes, confirmText)) {
+        return 'SESSION_EXPIRED';
+      }
+
       if (confirmRes.ok && !isResponse503OrHtmlError(confirmRes.status, confirmText)) {
         let msg = 'Đã ghi nhận vào hệ thống!';
         try {
@@ -1198,191 +1366,194 @@
         });
         renderQueue();
         setToast(`✅ <strong>Chốt đơn thành công:</strong> ${msg}`);
-
-        if (!isPageCrashed503() && typeof window.DSDK === 'function' && window.jQuery) {
-          const modVal = window.jQuery('.sel-dsdk-mod').select2('val');
-          window.DSDK(modVal);
-        }
+        triggerSilentTableRefresh();
         return true;
       } else {
         setToast(
-          '🔥 Đã bắt được slot nhưng bước Xác nhận đang nghẽn — Auto sẽ chốt lại ở chu kỳ sau!'
+          '📌 <strong>Solution C (Khóa Giỏ):</strong> Môn đã găm trong giỏ nhưng cổng Xác nhận đang nghẽn — Giữ nguyên giỏ để chốt lại ở nhịp sau!'
         );
       }
     } catch (err) {
-      setToast('🔥 Cổng xác nhận phản hồi quá 6s — Giữ nguyên các môn đã chọn để chốt lại!');
+      setToast('📌 <strong>Solution C (Khóa Giỏ):</strong> Cổng xác nhận phản hồi chậm — Giữ nguyên môn trong giỏ để chốt lại!');
     }
     return false;
   }
 
-  async function processCourseItem(item, isCanaryFirstPacket) {
+  // SOLUTION B: STRICTLY SERIALIZED SINGLE-SHOT PACING (1 gói/môn/chu kỳ, không bao giờ flood song song gây khóa Session ASP.NET)
+  async function processCourseItem(item) {
     if (item.status === 'confirmed') return 'CONFIRMED';
 
-    const totalBurst = clampBurst(burstInput.value || globalBurstCount);
-    globalBurstCount = totalBurst;
+    // Solution C: Nếu môn đã nằm trong giỏ ('selected'), tuyệt đối KHÔNG gọi lại /chon-mon-hoc để tránh bị toggle hủy chọn
+    if (item.status === 'selected') {
+      const commitRes = await commitSelectedCoursesImmediately();
+      if (commitRes === 'SESSION_EXPIRED') {
+        item.status = 'expired';
+        renderQueue();
+        return 'SESSION_EXPIRED';
+      }
+      return item.status === 'confirmed' ? 'CONFIRMED' : 'SELECTED';
+    }
+
+    const totalBurst = clampBurst(item.burstCount);
+    item.burstCount = totalBurst;
+    const currentProgress = item.burstProgress || 0;
+
+    if (currentProgress >= totalBurst) {
+      item.status = 'full';
+      renderQueue();
+      return 'QUOTA_REACHED';
+    }
+
     item.status = 'sending';
-    item.burstProgress = 1;
+    item.burstProgress = currentProgress + 1;
     renderQueue();
 
-    const firstResult = await sendSinglePacket(item);
+    const result = await sendSinglePacket(item);
 
-    if (firstResult === 'SESSION_EXPIRED') {
+    if (result === 'SESSION_EXPIRED') {
       item.status = 'expired';
       renderQueue();
       return 'SESSION_EXPIRED';
     }
 
-    if (firstResult === 'SELECTED') {
+    if (result === 'SELECTED') {
       item.status = 'selected';
       renderQueue();
-      if (totalBurst > 1) {
-        await commitSelectedCoursesImmediately();
+      setToast(
+        `🎯 <strong>Bắt dính slot!</strong> Môn <strong>${item.code}</strong> (#${item.id}) đã vào giỏ ở lượt treo <strong>#${item.burstProgress}/${totalBurst}</strong> — Đang chốt đơn ngay!`
+      );
+      const commitRes = await commitSelectedCoursesImmediately();
+      if (commitRes === 'SESSION_EXPIRED') {
+        item.status = 'expired';
+        renderQueue();
+        return 'SESSION_EXPIRED';
       }
       return 'SELECTED';
     }
 
-    if (isCanaryFirstPacket && canaryModeEnabled && firstResult === 'PORTAL_BLOCKED') {
+    if (result === 'PORTAL_BLOCKED') {
       item.status = 'overload';
       renderQueue();
       return 'PORTAL_BLOCKED';
     }
 
-    if (totalBurst > 1) {
-      let sentSoFar = 1;
-      let captured = false;
-      let expired = false;
-      let overloadSeen = firstResult === 'PORTAL_BLOCKED';
-
-      while (sentSoFar < totalBurst && !captured && !expired) {
-        const waveSize = Math.min(BURST_CONCURRENCY, totalBurst - sentSoFar);
-        const wavePromises = [];
-
-        for (let w = 0; w < waveSize; w++) {
-          wavePromises.push(
-            (async () => {
-              const r = await sendSinglePacket(item);
-              sentSoFar += 1;
-              item.burstProgress = sentSoFar;
-              renderQueue();
-              return r;
-            })()
-          );
-        }
-
-        const results = await Promise.all(wavePromises);
-
-        if (results.includes('SESSION_EXPIRED')) {
-          expired = true;
-          break;
-        }
-        if (results.includes('SELECTED')) {
-          captured = true;
-          break;
-        }
-        if (results.every((r) => r === 'PORTAL_BLOCKED')) {
-          overloadSeen = true;
-          if (canaryModeEnabled) break;
-        }
-
-        await sleep(45);
-      }
-
-      if (expired) {
-        item.status = 'expired';
-        renderQueue();
-        return 'SESSION_EXPIRED';
-      }
-
-      if (captured) {
-        item.status = 'selected';
-        renderQueue();
-        setToast(
-          `🎯 <strong>Auto Bắn Nền thành công!</strong> Đã bắt dính slot môn <strong>${item.code}</strong> ở gói tin thứ <strong>#${item.burstProgress}/${totalBurst}</strong>!`
-        );
-        await commitSelectedCoursesImmediately();
-        return 'SELECTED';
-      }
-
-      item.status = overloadSeen ? 'overload' : 'full';
-      renderQueue();
-      return overloadSeen ? 'PORTAL_BLOCKED' : 'CLASS_FULL';
+    // CLASS_FULL: Nếu chưa hết số lượt treo (burstCount), giữ ở trạng thái 'hanging' (Treo săn ngầm)
+    if (item.burstProgress < totalBurst) {
+      item.status = 'hanging';
+    } else {
+      item.status = 'full';
     }
-
-    item.status = firstResult === 'PORTAL_BLOCKED' ? 'overload' : 'full';
     renderQueue();
-    return firstResult;
+    return 'CLASS_FULL';
   }
 
   async function executeFastRegistration() {
     if (isProcessing || queue.length === 0) return;
     isProcessing = true;
 
-    const unconfirmedIndices = [];
-    queue.forEach((q, idx) => {
-      if (q.status !== 'confirmed') unconfirmedIndices.push(idx);
-    });
+    refreshSlotRadarFromDOM();
 
-    if (unconfirmedIndices.length === 0) {
-      setToast('🎉 Tất cả môn trong danh sách đều đã được <strong>Ghi nhận thành công</strong>!');
-      if (autoTimer) stopAutoMode();
-      isProcessing = false;
-      return;
-    }
-
-    const firstIdx = unconfirmedIndices[0];
-    const firstItem = queue[firstIdx];
-
-    const firstRes = await processCourseItem(firstItem, true);
-
-    if (firstRes === 'SESSION_EXPIRED') {
-      stopAutoMode();
-      setToast(
-        '🛑 <strong>PHANH KHẨN CẤP:</strong> Phát hiện phiên đăng nhập bị văng! Đã dừng Auto trong 0ms để tránh bị phạt Queue!'
-      );
-      saveQueue();
-      isProcessing = false;
-      return;
-    }
-
-    if (canaryModeEnabled && firstRes === 'PORTAL_BLOCKED' && unconfirmedIndices.length > 1) {
-      consecutiveOverloads += 1;
-      for (let k = 1; k < unconfirmedIndices.length; k++) {
-        const idx = unconfirmedIndices[k];
-        if (queue[idx].status !== 'selected' && queue[idx].status !== 'confirmed') {
-          queue[idx].status = 'shielded';
-        }
-      }
-      renderQueue();
-      setToast(
-        `🛡️ <strong>Chim Mồi báo cổng đang khóa/503:</strong> Đã phanh lại các môn sau để bảo vệ Session!`
-      );
-      saveQueue();
-      isProcessing = false;
-      return;
-    }
-
-    consecutiveOverloads = 0;
-    for (let k = 1; k < unconfirmedIndices.length; k++) {
-      await sleep(120 + Math.floor(Math.random() * 120));
-      const idx = unconfirmedIndices[k];
-      const res = await processCourseItem(queue[idx], false);
-      if (res === 'SESSION_EXPIRED') {
+    // Solution C: Nếu có môn đang găm sẵn trong giỏ ('selected'), ưu tiên chốt đơn trước
+    if (queue.some((q) => q.status === 'selected')) {
+      const preCommit = await commitSelectedCoursesImmediately();
+      if (preCommit === 'SESSION_EXPIRED') {
         stopAutoMode();
-        setToast('🛑 <strong>PHANH KHẨN CẤP:</strong> Phát hiện phiên đăng nhập bị văng!');
+        setToast(
+          '🛑 <strong>PHANH KHẨN CẤP:</strong> Phát hiện phiên đăng nhập bị văng! Đã dừng Auto trong 0ms để tránh bị phạt Queue!'
+        );
         saveQueue();
         isProcessing = false;
         return;
       }
     }
 
-    const anyStillSelected = queue.some((q) => q.status === 'selected');
-    if (anyStillSelected) {
-      await sleep(100);
+    // Lọc các môn chưa ghi nhận và còn lượt treo
+    const activeIndices = [];
+    queue.forEach((q, idx) => {
+      const maxQuota = clampBurst(q.burstCount);
+      const progress = q.burstProgress || 0;
+      if (q.status !== 'confirmed' && (q.status === 'selected' || progress < maxQuota)) {
+        activeIndices.push(idx);
+      } else if (q.status !== 'confirmed' && progress >= maxQuota) {
+        q.status = 'full';
+      }
+    });
+
+    if (activeIndices.length === 0) {
+      if (queue.every((q) => q.status === 'confirmed')) {
+        setToast('🎉 Tất cả môn trong danh sách đều đã được <strong>Ghi nhận thành công</strong>!');
+      } else {
+        setToast(
+          '⏸ Đã chạy đủ số lượt treo của tất cả môn. Bấm <strong>🔁 Auto</strong> hoặc nút <strong>↺</strong> để treo tiếp!'
+        );
+      }
+      if (isAutoRunning) stopAutoMode();
+      renderQueue();
+      saveQueue();
+      isProcessing = false;
+      return;
+    }
+
+    // Solution A: Ưu tiên môn đang có slot trống (ĐK < Tổng) lên đầu hàng đợi xử lý
+    activeIndices.sort((a, b) => {
+      const openA = queue[a].hasOpenSlot ? 1 : 0;
+      const openB = queue[b].hasOpenSlot ? 1 : 0;
+      return openB - openA;
+    });
+
+    // Solution B: Điểm danh tuần tự từng môn 1 gói/chu kỳ, giãn cách 850ms – 1350ms giữa các môn chống khóa Session ASP.NET
+    let blockedCount = 0;
+    for (let k = 0; k < activeIndices.length; k++) {
+      if (k > 0) {
+        const gapMs = INTER_COURSE_MIN_GAP_MS + Math.floor(Math.random() * INTER_COURSE_JITTER_MS);
+        await sleep(gapMs);
+      }
+      const idx = activeIndices[k];
+      const res = await processCourseItem(queue[idx]);
+      if (res === 'SESSION_EXPIRED') {
+        stopAutoMode();
+        setToast(
+          '🛑 <strong>PHANH KHẨN CẤP:</strong> Phát hiện phiên đăng nhập bị văng! Đã dừng Auto trong 0ms để tránh bị phạt Queue!'
+        );
+        saveQueue();
+        isProcessing = false;
+        return;
+      }
+      if (res === 'PORTAL_BLOCKED') {
+        blockedCount += 1;
+      }
+    }
+
+    if (blockedCount === activeIndices.length) {
+      consecutiveOverloads += 1;
+    } else {
+      consecutiveOverloads = 0;
+    }
+
+    // Solution C: Chốt lại lần cuối nếu trong chu kỳ vừa rồi có môn mới vào giỏ
+    if (queue.some((q) => q.status === 'selected')) {
+      await sleep(180);
       await commitSelectedCoursesImmediately();
     } else if (!queue.every((q) => q.status === 'confirmed')) {
-      setToast(
-        `⚠️ Các môn chưa đỗ hiện đang đầy (Đã bắn nền x${globalBurstCount} lần/môn). Bạn có thể chọn <strong>100 / 150</strong> hoặc nhập tới <strong>1000</strong> trên thanh Ghim môn!`
-      );
+      const hangingCount = queue.filter((q) => q.status === 'hanging').length;
+      if (hangingCount > 0) {
+        setToast(
+          `🛰️ <strong>Đang treo săn ngầm (${bgTimer.isWorkerBacked ? 'Web Worker' : 'Timer'}):</strong> Điểm danh tuần tự 1 gói/môn chống văng phiên. Có thể ẩn tab làm việc khác!`
+        );
+      } else {
+        setToast(
+          `⏸ Các môn chưa đỗ đã chạy hết số lượt treo. Bấm <strong>↺</strong> hoặc tăng ô <strong>🎯 số lượt</strong> (tối đa ${MAX_BURST}) để treo tiếp!`
+        );
+        if (isAutoRunning && queue.every((q) => q.status === 'confirmed' || q.status === 'full')) {
+          stopAutoMode();
+        }
+      }
+    }
+
+    // Solution A: Định kỳ 3 chu kỳ Auto làm mới nhẹ bảng #divDSDK ngầm để cập nhật cột ĐK/Tổng mới nhất
+    autoTickCount += 1;
+    if (isAutoRunning && autoTickCount % 3 === 0) {
+      triggerSilentTableRefresh();
     }
 
     saveQueue();
@@ -1390,53 +1561,76 @@
   }
 
   function stopAutoMode() {
-    if (autoTimer) {
-      clearTimeout(autoTimer);
-      autoTimer = null;
-    }
+    isAutoRunning = false;
+    bgTimer.clear('autoTick');
     autoBtn.classList.remove('active');
     autoBtn.textContent = '🔁 Auto';
   }
 
   function scheduleNextAutoTick() {
-    if (!autoBtn.classList.contains('active')) return;
-    const adaptiveExtraMs = Math.min(2000, consecutiveOverloads * 350);
-    const humanJitterMs = 200 + Math.floor(Math.random() * 550);
+    if (!isAutoRunning) return;
+    const adaptiveExtraMs = Math.min(2500, consecutiveOverloads * 450);
+    const humanJitterMs = 250 + Math.floor(Math.random() * 600);
     const nextDelayMs = intervalSec * 1000 + adaptiveExtraMs + humanJitterMs;
 
-    autoTimer = setTimeout(async () => {
-      await executeFastRegistration();
-      if (autoBtn.classList.contains('active')) {
-        scheduleNextAutoTick();
-      }
-    }, nextDelayMs);
+    bgTimer.setTimeout(
+      'autoTick',
+      async () => {
+        await executeFastRegistration();
+        if (isAutoRunning) {
+          scheduleNextAutoTick();
+        }
+      },
+      nextDelayMs
+    );
   }
 
   fastBtn.addEventListener('click', () => {
+    // Nếu các môn đã chạy hết quota ở lần trước, tự mở lại lượt treo khi user bấm Đăng Ký Nhanh
+    if (
+      queue.length > 0 &&
+      queue.every((q) => q.status === 'confirmed' || (q.burstProgress || 0) >= clampBurst(q.burstCount))
+    ) {
+      queue.forEach((q) => {
+        if (q.status !== 'confirmed') {
+          q.status = 'idle';
+          q.burstProgress = 0;
+        }
+      });
+    }
     executeFastRegistration();
   });
 
   autoBtn.addEventListener('click', async () => {
-    if (autoBtn.classList.contains('active')) {
+    if (isAutoRunning) {
       stopAutoMode();
-      setToast('⏹ Đã dừng chế độ tự động săn slot.');
+      setToast('⏹ Đã dừng chế độ treo săn slot ngầm.');
       return;
     }
 
     consecutiveOverloads = 0;
-    if (queue.length > 0 && queue.every((q) => q.status === 'confirmed')) {
+    autoTickCount = 0;
+
+    // Mở lại bộ đếm lượt treo cho các môn chưa đỗ đã hết lượt
+    const anyRunnable = queue.some(
+      (q) => q.status !== 'confirmed' && (q.burstProgress || 0) < clampBurst(q.burstCount)
+    );
+    if (!anyRunnable) {
       queue.forEach((q) => {
-        q.status = 'idle';
-        q.attempts = 0;
-        q.burstProgress = 0;
+        if (q.status !== 'confirmed' || queue.every((item) => item.status === 'confirmed')) {
+          q.status = 'idle';
+          q.attempts = 0;
+          q.burstProgress = 0;
+        }
       });
     }
 
     intervalSec = Math.max(1, parseInt(intervalInput.value, 10) || 2);
+    isAutoRunning = true;
     autoBtn.classList.add('active');
-    autoBtn.textContent = `⏹ Đang Auto (${intervalSec}s)`;
+    autoBtn.textContent = `⏹ Đang Treo (${intervalSec}s)`;
     await executeFastRegistration();
-    if (autoBtn.classList.contains('active')) {
+    if (isAutoRunning) {
       scheduleNextAutoTick();
     }
   });
@@ -1448,8 +1642,12 @@
     if (event.data.type === 'QUEUE_LOADED' && Array.isArray(event.data.queue)) {
       queue = event.data.queue.map((item) => ({
         ...item,
-        burstProgress: 0
+        burstCount: clampBurst(item.burstCount),
+        burstProgress: item.burstProgress || 0,
+        slotText: item.slotText || '',
+        hasOpenSlot: Boolean(item.hasOpenSlot)
       }));
+      refreshSlotRadarFromDOM();
       renderQueue();
     }
   });
