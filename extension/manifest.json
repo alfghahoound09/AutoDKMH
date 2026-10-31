@@ -4,7 +4,7 @@
   "version": "2.0.0",
   "author": "Duc Lv",
   "homepage_url": "https://duclvz.github.io/AutoDKMH",
-  "description": "Công cụ hỗ trợ đăng ký môn học VNU tốc độ cao với Live Queue Cards, Ghim môn Burst x100, Chim Mồi Canary chống văng phiên và chống lỗi 503.",
+  "description": "Công cụ hỗ trợ đăng ký môn học VNU",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
