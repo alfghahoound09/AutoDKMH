@@ -389,7 +389,7 @@ def render_dsdk_tbody_rows():
 
         rows_html.append(
             f"""
-            <tr class="{row_class}">
+            <tr class="{row_class}" data-rowindex="{c['rowindex']}">
               <td class="vnu-col-check">{checkbox_html}</td>
               <td>{c['name']}</td>
               <td style="text-align:center;">{c['credits']}</td>
@@ -1697,15 +1697,12 @@ class MockVNUHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
-            # Kịch bản 2 & 3: Ngoài thời hạn đăng ký hoặc Đang khóa đăng ký học (Sau 2 lần Chim Mồi thăm dò sẽ tự mở cổng!)
-            if sim_state["mode"] in ("portal_locked", "out_of_time"):
+            # Kịch bản 3: Đang khóa đăng ký học (Sau 2 lần thăm dò sẽ tự mở cổng!)
+            # Lưu ý: Ở kịch bản 2 ("Ngoài thời hạn đăng ký!"), cổng VNU khóa giao diện phía client (ẩn ô tick), nhưng extension đã mở khóa nên vẫn cho phép chọn môn!
+            if sim_state["mode"] == "portal_locked":
                 sim_state["probe_counter"] += 1
                 if sim_state["probe_counter"] <= 2:
-                    msg = (
-                        "Ngoài thời hạn đăng ký!"
-                        if sim_state["mode"] == "out_of_time"
-                        else "Đang khóa đăng ký học, bạn vui lòng thử lại sau!"
-                    )
+                    msg = "Đang khóa đăng ký học, bạn vui lòng thử lại sau!"
                     self._send(200, f"<div>{msg}</div>", "text/html; charset=utf-8")
                     return
                 else:
